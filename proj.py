@@ -1,6 +1,6 @@
 import sys
 
-from pulp import GLPK_CMD, LpInteger, LpMinimize, LpProblem, LpStatusOptimal, LpVariable, lpSum, value
+from pulp import LpInteger, LpMinimize, LpProblem, LpStatusOptimal, LpVariable, PULP_CBC_CMD, lpSum, value
 
 
 def main():
@@ -44,37 +44,40 @@ def main():
         elif result == (t2 + 1):
             current_points[t2] += 3
 
-    for target_team in range(n_teams):
-        target_remaining_matches = 0
-        target_matches_list = []
+    games_list = [((i, j), c) for (i, j), c in remaining_games.items() if c > 0]
+    vars_wins = {}
+    vars_draws = {}
+    vars_losses = {}
+    base_constraints = []
+    team_point_terms = [[] for _ in range(n_teams)]
+    matches_by_team = [[] for _ in range(n_teams)]
 
-        for i in range(n_teams):
-            if i == target_team:
-                continue
-            pair = tuple(sorted((target_team, i)))
-            count = remaining_games[pair]
-            target_remaining_matches += count
-            if count > 0:
-                target_matches_list.append((i, pair))
+    for (i, j), count in games_list:
+        x = LpVariable(f"x_{i}_{j}", lowBound=0, upBound=count, cat=LpInteger)
+        y = LpVariable(f"y_{i}_{j}", lowBound=0, upBound=count, cat=LpInteger)
+        z = LpVariable(f"z_{i}_{j}", lowBound=0, upBound=count, cat=LpInteger)
+
+        vars_wins[(i, j)] = x
+        vars_draws[(i, j)] = y
+        vars_losses[(i, j)] = z
+
+        base_constraints.append(x + y + z == count)
+
+        team_point_terms[i].append(3 * x + y)
+        team_point_terms[j].append(3 * z + y)
+
+        matches_by_team[i].append((j, (i, j)))
+        matches_by_team[j].append((i, (i, j)))
+
+    solver = PULP_CBC_CMD(msg=0, presolve=True, threads=0)
+
+    for target_team in range(n_teams):
+        target_matches_list = matches_by_team[target_team]
+        target_remaining_matches = sum(remaining_games[pair] for _, pair in target_matches_list)
 
         prob = LpProblem("Projeto3", LpMinimize)
-
-        vars_wins = {}
-        vars_draws = {}
-        vars_losses = {}
-
-        for (i, j), count in remaining_games.items():
-            if count <= 0:
-                continue
-            x = LpVariable(f"x_{i}_{j}", lowBound=0, upBound=count, cat=LpInteger)
-            y = LpVariable(f"y_{i}_{j}", lowBound=0, upBound=count, cat=LpInteger)
-            z = LpVariable(f"z_{i}_{j}", lowBound=0, upBound=count, cat=LpInteger)
-
-            vars_wins[(i, j)] = x
-            vars_draws[(i, j)] = y
-            vars_losses[(i, j)] = z
-
-            prob += (x + y + z == count)
+        for c in base_constraints:
+            prob += c
 
         target_wins_vars = []
         target_losses_vars = []
@@ -94,6 +97,7 @@ def main():
             upBound=target_remaining_matches,
             cat=LpInteger,
         )
+
         prob += (w_var == lpSum(target_wins_vars)) if target_wins_vars else (w_var == 0)
         if target_losses_vars:
             prob += (lpSum(target_losses_vars) == 0)
@@ -103,30 +107,13 @@ def main():
         for opp in range(n_teams):
             if opp == target_team:
                 continue
-            future_points_opp = []
-
-            for (u, v), count in remaining_games.items():
-                if count == 0:
-                    continue
-
-                if u == opp:
-                    future_points_opp.append(3 * vars_wins[(u, v)])
-                    future_points_opp.append(vars_draws[(u, v)])
-                elif v == opp:
-                    future_points_opp.append(3 * vars_losses[(u, v)])
-                    future_points_opp.append(vars_draws[(u, v)])
-
-            prob += (current_points[opp] + lpSum(future_points_opp) <= points_target)
+            prob += (current_points[opp] + lpSum(team_point_terms[opp]) <= points_target)
 
         prob += w_var
 
-        status = prob.solve(GLPK_CMD(msg=0))
+        status = prob.solve(solver)
 
-        if status == LpStatusOptimal:
-            min_wins_found = int(value(w_var))
-        else:
-            min_wins_found = -1
-
+        min_wins_found = int(value(w_var)) if status == LpStatusOptimal else -1
         print(min_wins_found)
 
 
